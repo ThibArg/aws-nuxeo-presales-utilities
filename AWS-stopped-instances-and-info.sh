@@ -12,7 +12,7 @@ OUTPUT="stopped-ec2-report-$(date +%Y%m%d-%H%M%S).csv"
 NOT_FOUND="> 3 months"
 
 echo "Generating report of stopped EC2 instances across all regions..."
-echo -e "    ⚠️        ⚠️        ⚠️\n.   For stopped instances, getting the last launch time and user requires CloudTrail which slows down the script. \n.   ⚠️        ⚠️        ⚠️\n"
+echo -e "    ⚠️        ⚠️        ⚠️\n    For stopped instances, getting the last launch time and user requires CloudTrail which slows down the script. \n    ⚠️        ⚠️        ⚠️\n"
 
 # CSV header
 echo "Region,InstanceId,InstanceName,InstanceType,CreationDate,CreationUser,LastLaunchTime,LastLaunchUser" > "$OUTPUT"
