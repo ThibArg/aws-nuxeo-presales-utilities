@@ -127,7 +127,7 @@ for REGION in $REGIONS; do
     # Progress message every 5 instances
     PROCESSED=$((PROCESSED + 1))
     if (( PROCESSED % 5 == 0 )); then
-      echo "    Processed: $PROCESSED / $COUNT..."
+      echo "    Processed: $PROCESSED..."
     fi
   done < <(echo "$INSTANCES_JSON" | jq -c '.[]')
 
