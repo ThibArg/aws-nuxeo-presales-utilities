@@ -8,7 +8,7 @@ set -euo pipefail
 OUTPUT="stopped-ec2-report-$(date +%Y%m%d-%H%M%S).csv"
 
 # Placeholder used when CloudTrail has no matching event
-# (typically because it falls outside the 90-day retention window)
+# (typically because it falls outside the default 90-day retention window)
 NOT_FOUND="> 3 months"
 
 echo "Generating report of stopped EC2 instances across all regions..."
@@ -28,15 +28,12 @@ csv_escape() {
   fi
 }
 
-# Extract the date part (YYYY-MM-DD) from a CloudTrail ISO timestamp.
-# Returns the input unchanged if it's the NOT_FOUND placeholder or already short.
+# Extract only the date part (YYYY-MM-DD)
 iso_date_only() {
   local s="${1:-}"
   if [[ "$s" == "$NOT_FOUND" || -z "$s" ]]; then
     printf '%s' "$s"
   else
-    # CloudTrail returns timestamps like "2026-06-25T14:05:03Z" or
-    # "2026-06-25T14:05:03+00:00" -> take only the first 10 chars.
     printf '%s' "${s:0:10}"
   fi
 }
@@ -49,16 +46,16 @@ REGIONS=$(aws ec2 describe-regions \
 for REGION in $REGIONS; do
   echo "$REGION..."
 
-  # Fetch all stopped instances in the region
+  # Fetch all stopped instances in the region, including EC2 LaunchTime
   INSTANCES_JSON=$(aws ec2 describe-instances \
     --region "$REGION" \
     --filters "Name=instance-state-name,Values=stopped" \
-    --query 'Reservations[].Instances[].{Id:InstanceId,Type:InstanceType,Name:Tags[?Key==`Name`]|[0].Value}' \
+    --query 'Reservations[].Instances[].{Id:InstanceId,Type:InstanceType,Name:Tags[?Key==`Name`]|[0].Value,LaunchTime:LaunchTime}' \
     --output json 2>/dev/null || echo "[]")
 
   COUNT=$(echo "$INSTANCES_JSON" | jq 'length')
   if [[ "$COUNT" -eq 0 ]]; then
-    echo "  No stopped instance(s) found"
+    echo "  No stopped instances found"
     continue
   fi
 
@@ -67,24 +64,28 @@ for REGION in $REGIONS; do
   # Progress counter for CloudTrail processing in this region
   PROCESSED=0
 
-  # NOTE: piping into `while` would create a subshell, so PROCESSED would
-  # not be visible outside. We use process substitution instead.
+  # Use process substitution so the loop runs in the current shell
   while read -r row; do
     ID=$(echo "$row"   | jq -r '.Id')
     TYPE=$(echo "$row" | jq -r '.Type')
     NAME=$(echo "$row" | jq -r '.Name // "N/A"')
 
-    # --- RunInstances event (creation): take the oldest one
+    # Creation date comes from EC2 LaunchTime (instance attribute)
+    CREATION_DATE=$(echo "$row" | jq -r '.LaunchTime // empty')
+    CREATION_DATE=$(iso_date_only "$CREATION_DATE")
+    if [[ -z "$CREATION_DATE" ]]; then
+      CREATION_DATE="$NOT_FOUND"
+    fi
+
+    # --- RunInstances event (creation user): take the oldest one
     RUN_EVENT=$(aws cloudtrail lookup-events \
       --region "$REGION" \
       --lookup-attributes AttributeKey=ResourceName,AttributeValue="$ID" \
       --query 'Events[?EventName==`RunInstances`] | [-1]' \
       --output json 2>/dev/null || echo "null")
 
-    CREATION_DATE="$NOT_FOUND"
     CREATION_USER="$NOT_FOUND"
     if [[ "$RUN_EVENT" != "null" && -n "$RUN_EVENT" ]]; then
-      CREATION_DATE=$(echo "$RUN_EVENT" | jq -r --arg nf "$NOT_FOUND" '.EventTime // $nf')
       CREATION_USER=$(echo "$RUN_EVENT" | jq -r --arg nf "$NOT_FOUND" '.Username // $nf')
     fi
 
@@ -102,14 +103,7 @@ for REGION in $REGIONS; do
       LAST_LAUNCH_USER=$(echo "$START_EVENT" | jq -r --arg nf "$NOT_FOUND" '.Username // $nf')
     fi
 
-    # If no StartInstances event was found (e.g. instance never restarted), fall back to RunInstances
-    if [[ "$LAST_LAUNCH_TIME" == "$NOT_FOUND" ]]; then
-      LAST_LAUNCH_TIME="$CREATION_DATE"
-      LAST_LAUNCH_USER="$CREATION_USER"
-    fi
-
-    # Keep only the date part (YYYY-MM-DD) for the date columns
-    CREATION_DATE=$(iso_date_only "$CREATION_DATE")
+    # Keep only the date part for date columns
     LAST_LAUNCH_TIME=$(iso_date_only "$LAST_LAUNCH_TIME")
 
     # Write the CSV row
@@ -127,11 +121,11 @@ for REGION in $REGIONS; do
     # Progress message every 5 instances
     PROCESSED=$((PROCESSED + 1))
     if (( PROCESSED % 5 == 0 )); then
-      echo "    Processed: $PROCESSED..."
+      echo "    $PROCESSED..."
     fi
   done < <(echo "$INSTANCES_JSON" | jq -c '.[]')
 
-  echo "  Done with $REGION ($PROCESSED / $COUNT processed)"
+  echo "   Done with $REGION ($PROCESSED / $COUNT processed)"
 done
 
 echo "Report generated: $OUTPUT"
